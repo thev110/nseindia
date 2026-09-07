@@ -1,78 +1,127 @@
 //@version=5
-indicator("NSE NIFTY Options Settle & ATM Strike Tool", overlay=true)
+indicator("NSE NIFTY Options Settle & ATM Strike Tool (With Date Selector)", overlay=true)
 
-// --- User Inputs ---
-strikeStep = input.int(50, title="Strike Step", options=[50, 100])
-roundTo100 = input.bool(false, title="Force Round to 100s (e.g. 23700 / 23800)")
+// --- Group: Mode & Date Selection ---
+string modeInput      = input.string("Latest Close", title="Data Mode", options=["Latest Close", "Selected Date"], group="Date Selection")
+int selectedTimestamp = input.time(timestamp("04 Sep 2026 09:15 +0530"), title="Select Date (Calendar)", group="Date Selection")
 
-// --- Spot Price & Strike Calculation ---
-spotPrice = request.security("NSE:NIFTY", "D", close)
-if na(spotPrice)
-    spotPrice := close
+// --- Group: Strike Price Settings ---
+int strikeStep       = input.int(50, title="Strike Step Interval", options=[50, 100], group="Strike Calculation")
+bool forceRound100   = input.bool(false, title="Force Round to 100s (e.g. 23700 / 23800)", group="Strike Calculation")
+bool useManualStrike = input.bool(false, title="Use Manual Strike Override", group="Strike Calculation")
+float manualStrike   = input.float(23700.0, title="Manual Strike Price", group="Strike Calculation")
 
-var float atmStrike = na
-var float lowerStrike100 = na
-var float upperStrike100 = na
+// --- Group: Option Ticker Settings ---
+string expiryString  = input.string("26SEP", title="Option Expiry Code (e.g. 26SEP)", group="Options Data")
 
-if not na(spotPrice)
-    if roundTo100
-        atmStrike := math.round(spotPrice / 100) * 100
+// --- Fetch NIFTY Spot Price ---
+spotClose = request.security("NSE:NIFTY", "D", close)
+if na(spotClose)
+    spotClose := close
+
+// Target date logic
+bool isTargetDate = false
+if modeInput == "Selected Date"
+    // Match date (year, month, day)
+    int targetYear  = year(selectedTimestamp)
+    int targetMonth = month(selectedTimestamp)
+    int targetDay   = dayofmonth(selectedTimestamp)
+    isTargetDate   := (year == targetYear and month == targetMonth and dayofmonth == targetDay)
+else
+    isTargetDate   := barstate.islast
+
+// Save historical values for selected date
+var float targetSpot      = na
+var string targetDateStr  = ""
+
+if isTargetDate
+    targetSpot    := spotClose
+    targetDateStr := str.format("{0,date,yyyy-MM-dd}", time)
+
+// If latest mode, use current barstate.islast spot
+if modeInput == "Latest Close" and barstate.islast
+    targetSpot    := spotClose
+    targetDateStr := str.format("{0,date,yyyy-MM-dd}", time)
+
+// --- Calculate ATM and Round Strikes ---
+float calcATM = na
+float lower100 = na
+float upper100 = na
+
+if not na(targetSpot)
+    if forceRound100
+        calcATM := math.round(targetSpot / 100.0) * 100.0
     else
-        atmStrike := math.round(spotPrice / strikeStep) * strikeStep
+        calcATM := math.round(targetSpot / float(strikeStep)) * float(strikeStep)
         
-    lowerStrike100 := math.floor(spotPrice / 100) * 100
-    upperStrike100 := math.ceil(spotPrice / 100) * 100
+    lower100 := math.floor(targetSpot / 100.0) * 100.0
+    upper100 := math.ceil(targetSpot / 100.0) * 100.0
 
-// --- Option Symbols (TradingView Format) ---
-// Note: If you subscribe to TV Option feeds, format is e.g. NSE:NIFTY2690823700CE
-expiryString = input.string("26SEP", title="Expiry Code (e.g., 26SEP)")
+float activeStrike = useManualStrike ? manualStrike : calcATM
 
-callTickerATM = "NSE:NIFTY" + expiryString + str.tostring(atmStrike, "#") + "CE"
-putTickerATM  = "NSE:NIFTY" + expiryString + str.tostring(atmStrike, "#") + "PE"
+// --- Request Call & Put Option Settlement Prices ---
+string ceTicker = "NSE:NIFTY" + expiryString + str.tostring(activeStrike, "#") + "CE"
+string peTicker = "NSE:NIFTY" + expiryString + str.tostring(activeStrike, "#") + "PE"
 
-callSettlePrice = request.security(callTickerATM, "D", close, ignore_invalid_symbol=true)
-putSettlePrice  = request.security(putTickerATM, "D", close, ignore_invalid_symbol=true)
+float cePrice = request.security(ceTicker, "D", close, ignore_invalid_symbol=true)
+float pePrice = request.security(peTicker, "D", close, ignore_invalid_symbol=true)
 
-float combinedSettle = na
-if not na(callSettlePrice) and not na(putSettlePrice)
-    combinedSettle := callSettlePrice + putSettlePrice
+// Target bar option prices
+var float targetCE = na
+var float targetPE = na
 
-// --- Data Table on TradingView Chart ---
-var table summaryTable = table.new(position.top_right, 4, 6, bgcolor=color.new(color.black, 20), border_width=1, border_color=color.gray)
+if isTargetDate
+    targetCE := cePrice
+    targetPE := pePrice
+
+if modeInput == "Latest Close" and barstate.islast
+    targetCE := cePrice
+    targetPE := pePrice
+
+float combinedPrem = (not na(targetCE) and not na(targetPE)) ? (targetCE + targetPE) : na
+
+// --- Summary Table Dashboard ---
+var table tb = table.new(position.top_right, 4, 7, bgcolor=color.new(color.black, 15), border_width=1, border_color=color.gray)
 
 if barstate.islast
     // Header
-    table.cell(summaryTable, 0, 0, "Metric", bgcolor=color.navy, text_color=color.white)
-    table.cell(summaryTable, 1, 0, "Value / Strike", bgcolor=color.navy, text_color=color.white)
-    table.cell(summaryTable, 2, 0, "Call (CE)", bgcolor=color.navy, text_color=color.white)
-    table.cell(summaryTable, 3, 0, "Put (PE)", bgcolor=color.navy, text_color=color.white)
+    table.cell(tb, 0, 0, "Metric / Field", bgcolor=color.navy, text_color=color.white)
+    table.cell(tb, 1, 0, "Details", bgcolor=color.navy, text_color=color.white)
+    table.cell(tb, 2, 0, "Call (CE)", bgcolor=color.navy, text_color=color.white)
+    table.cell(tb, 3, 0, "Put (PE)", bgcolor=color.navy, text_color=color.white)
 
-    // Row 1: NIFTY Spot Price
-    table.cell(summaryTable, 0, 1, "NIFTY Spot Close", text_color=color.white)
-    table.cell(summaryTable, 1, 1, str.tostring(spotPrice, "#.##"), text_color=color.yellow)
-    table.cell(summaryTable, 2, 1, "-", text_color=color.gray)
-    table.cell(summaryTable, 3, 1, "-", text_color=color.gray)
+    // Row 1: Active Date
+    table.cell(tb, 0, 1, "Mode / Date", text_color=color.white)
+    table.cell(tb, 1, 1, modeInput + " (" + (na(targetDateStr) ? "N/A" : targetDateStr) + ")", text_color=color.yellow)
+    table.cell(tb, 2, 1, "-", text_color=color.gray)
+    table.cell(tb, 3, 1, "-", text_color=color.gray)
 
-    // Row 2: Computed ATM Strike
-    table.cell(summaryTable, 0, 2, "ATM Strike", text_color=color.white)
-    table.cell(summaryTable, 1, 2, str.tostring(atmStrike, "#"), text_color=color.cyan)
-    table.cell(summaryTable, 2, 2, na(callSettlePrice) ? "N/A" : str.tostring(callSettlePrice, "#.##"), text_color=color.green)
-    table.cell(summaryTable, 3, 2, na(putSettlePrice) ? "N/A" : str.tostring(putSettlePrice, "#.##"), text_color=color.red)
+    // Row 2: NIFTY Spot Price
+    table.cell(tb, 0, 2, "NIFTY Spot Close", text_color=color.white)
+    table.cell(tb, 1, 2, na(targetSpot) ? "N/A" : str.tostring(targetSpot, "#.##"), text_color=color.yellow)
+    table.cell(tb, 2, 2, "-", text_color=color.gray)
+    table.cell(tb, 3, 2, "-", text_color=color.gray)
 
-    // Row 3: Lower 100 Strike
-    table.cell(summaryTable, 0, 3, "Lower Strike", text_color=color.white)
-    table.cell(summaryTable, 1, 3, str.tostring(lowerStrike100, "#"), text_color=color.white)
-    table.cell(summaryTable, 2, 3, "-", text_color=color.gray)
-    table.cell(summaryTable, 3, 3, "-", text_color=color.gray)
+    // Row 3: Selected ATM Strike
+    table.cell(tb, 0, 3, "Selected Strike", text_color=color.white)
+    table.cell(tb, 1, 3, na(activeStrike) ? "N/A" : str.tostring(activeStrike, "#"), text_color=color.cyan)
+    table.cell(tb, 2, 3, na(targetCE) ? "N/A" : str.tostring(targetCE, "#.##"), text_color=color.green)
+    table.cell(tb, 3, 3, na(targetPE) ? "N/A" : str.tostring(targetPE, "#.##"), text_color=color.red)
 
-    // Row 4: Upper 100 Strike
-    table.cell(summaryTable, 0, 4, "Upper Strike", text_color=color.white)
-    table.cell(summaryTable, 1, 4, str.tostring(upperStrike100, "#"), text_color=color.white)
-    table.cell(summaryTable, 2, 4, "-", text_color=color.gray)
-    table.cell(summaryTable, 3, 4, "-", text_color=color.gray)
+    // Row 4: Lower 100 Strike
+    table.cell(tb, 0, 4, "Lower 100 Strike", text_color=color.white)
+    table.cell(tb, 1, 4, na(lower100) ? "N/A" : str.tostring(lower100, "#"), text_color=color.gray)
+    table.cell(tb, 2, 4, "-", text_color=color.gray)
+    table.cell(tb, 3, 4, "-", text_color=color.gray)
 
-    // Row 5: Combined Settle Price (Straddle)
-    table.cell(summaryTable, 0, 5, "Combined (CE+PE)", text_color=color.white)
-    table.cell(summaryTable, 1, 5, na(combinedSettle) ? "N/A" : str.tostring(combinedSettle, "#.##"), text_color=color.orange, bgcolor=color.new(color.orange, 80))
-    table.cell(summaryTable, 2, 5, "-", text_color=color.gray)
-    table.cell(summaryTable, 3, 5, "-", text_color=color.gray)
+    // Row 5: Upper 100 Strike
+    table.cell(tb, 0, 5, "Upper 100 Strike", text_color=color.white)
+    table.cell(tb, 1, 5, na(upper100) ? "N/A" : str.tostring(upper100, "#"), text_color=color.gray)
+    table.cell(tb, 2, 5, "-", text_color=color.gray)
+    table.cell(tb, 3, 5, "-", text_color=color.gray)
+
+    // Row 6: Combined Settle Premium (CE + PE)
+    table.cell(tb, 0, 6, "Combined Settle (CE+PE)", text_color=color.white)
+    table.cell(tb, 1, 6, na(combinedPrem) ? "N/A" : str.tostring(combinedPrem, "#.##"), text_color=color.orange, bgcolor=color.new(color.orange, 80))
+    table.cell(tb, 2, 6, "-", text_color=color.gray)
+    table.cell(tb, 3, 6, "-", text_color=color.gray)
