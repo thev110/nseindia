@@ -1,0 +1,13 @@
+{
+  "name": "nifty-settlement-tool",
+  "version": "1.0.0",
+  "description": "NSE NIFTY Options Post-Market Settlement Price Calculator using Vercel & Firecrawl",
+  "main": "api/fetch-settlement.js",
+  "scripts": {
+    "start": "node api/fetch-settlement.js"
+  },
+  "dependencies": {
+    "@mendable/firecrawl-js": "^1.8.0",
+    "dotenv": "^16.4.5"
+  }
+}
